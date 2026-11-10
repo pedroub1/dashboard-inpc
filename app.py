@@ -64,17 +64,22 @@ def _fmt_index(idx):
     """Formatea un DatetimeIndex completo para mostrar en tablas."""
     return [_fmt_date(d) for d in idx]
 
+@st.cache_data(ttl=6 * 3600, show_spinner="Descargando datos de Banxico...")
+def _refresh_from_banxico(quincenal):
+    """Descarga de Banxico al arrancar y cada 6 h. En Streamlit Cloud el disco se
+    reinicia con cada reboot, así que el CSV guardado por el botón no persiste.
+    Si falla lanza excepción, y st.cache_data no la guarda: se reintenta en el siguiente rerun."""
+    (fetch_from_banxico_q if quincenal else fetch_from_banxico)()
+    return True
+
+
 if st.sidebar.button("Actualizar datos desde Banxico"):
-    with st.spinner("Descargando datos de Banxico..."):
-        try:
-            if is_q:
-                df = fetch_from_banxico_q()
-            else:
-                df = fetch_from_banxico()
-            st.sidebar.success(f"Datos actualizados. Último: {_fmt_date(df.index.max())}")
-            st.cache_data.clear()
-        except Exception as e:
-            st.sidebar.error(f"Error al descargar: {e}")
+    st.cache_data.clear()
+
+try:
+    _refresh_from_banxico(is_q)
+except Exception as e:
+    st.sidebar.warning(f"No se pudo descargar de Banxico; se usan los datos guardados. ({e})")
 
 # --- Navegación ---
 pagina = st.sidebar.radio("Página", ["Serie Original", "Ajuste Estacional", "Pronósticos", "Redes Neuronales", "Manual"])
@@ -337,10 +342,14 @@ elif pagina == "Pronósticos":
     @st.cache_data
     def fit_forecast_single(values, index_str, arima_ord, arima_tr, sarima_ord, sarima_seas, sarima_tr, horizon, quincenal):
         from concurrent.futures import ThreadPoolExecutor
-        idx = pd.DatetimeIndex(index_str)
-        if not quincenal:
+        if quincenal:
+            # Fechas 1/16 sin freq de pandas: statsmodels >= 0.15 no pronostica
+            # con ese índice, así que se ajusta sobre índice entero.
+            s = pd.Series(values)
+        else:
+            idx = pd.DatetimeIndex(index_str)
             idx.freq = "MS"
-        s = pd.Series(values, index=idx)
+            s = pd.Series(values, index=idx)
 
         def _fit_arima():
             model = SARIMAX(s, order=arima_ord, trend=arima_tr,
@@ -368,9 +377,8 @@ elif pagina == "Pronósticos":
         sarima_ci = sarima_pred.conf_int().values
 
         # Generar índice de fechas del pronóstico
-        last_date = s.index[-1]
         if quincenal:
-            fc_idx = _next_q_dates(last_date, horizon)
+            fc_idx = _next_q_dates(pd.Timestamp(index_str[-1]), horizon)
         else:
             fc_idx = arima_pred.predicted_mean.index
 
