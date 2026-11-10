@@ -1261,10 +1261,13 @@ elif pagina == "Manual":
     # --- Funciones de pronóstico ---
     @st.cache_data
     def _forecast_arima_sarima(serie_name, values, index_str, orders_dict, quincenal):
-        idx = pd.DatetimeIndex(index_str)
-        if not quincenal:
+        if quincenal:
+            # Índice entero: statsmodels >= 0.15 no pronostica con fechas 1/16 sin freq
+            s = pd.Series(values)
+        else:
+            idx = pd.DatetimeIndex(index_str)
             idx.freq = "MS"
-        s = pd.Series(values, index=idx)
+            s = pd.Series(values, index=idx)
         results = {}
 
         arima_ord = tuple(orders_dict["arima_order"])
@@ -1286,7 +1289,7 @@ elif pagina == "Manual":
         results["SARIMA"] = pred_s.predicted_mean.values
 
         if quincenal:
-            fc_idx = _next_q_dates(s.index[-1], HORIZON).astype(str).tolist()
+            fc_idx = _next_q_dates(pd.Timestamp(index_str[-1]), HORIZON).astype(str).tolist()
         else:
             fc_idx = pred_a.predicted_mean.index.astype(str).tolist()
         return results, fc_idx
@@ -1427,8 +1430,8 @@ elif pagina == "Manual":
 
     # Boton para resetear drifts
     def _reset_drifts():
-        if "manual_drift_t" in st.session_state:
-            del st.session_state["manual_drift_t"]
+        for nombre in nombres:
+            st.session_state[f"manual_drift_{nombre}"] = 0.0
 
     st.button("Resetear drifts a 0", key="reset_drifts", on_click=_reset_drifts)
 
@@ -1462,23 +1465,15 @@ elif pagina == "Manual":
     })
     st.dataframe(ref_t.style.format("{:.4f}"), use_container_width=True)
 
-    # Tabla editable: solo Drift
-    drift_t = pd.DataFrame({
-        nombre: {"Drift (pp)": 0.0}
-        for nombre in nombres
-    })
-
-    edited_drift = st.data_editor(
-        drift_t,
-        use_container_width=True,
-        key="manual_drift_t",
-        num_rows="fixed",
-        disabled={"_index": True},
-        column_config={
-            nombre: st.column_config.NumberColumn(format="%.4f")
-            for nombre in nombres
-        },
-    )
+    # Drift por subcomponente. Antes era un st.data_editor, pero su NumberColumn usa el
+    # separador decimal del navegador: en español ignoraba el "." (0.5 quedaba en 5).
+    drifts = {}
+    cols_drift = st.columns(3)
+    for i, nombre in enumerate(nombres):
+        with cols_drift[i % 3]:
+            drifts[nombre] = st.number_input(
+                f"Drift {nombre} (pp)", step=0.01, format="%.4f",
+                key=f"manual_drift_{nombre}")
 
     # Recalcular ajustado y niveles
     adjusted_forecasts = {}  # nivel t+1
@@ -1489,7 +1484,7 @@ elif pagina == "Manual":
         last_val = df[hoja].dropna().iloc[-1]
         base_levels[hoja] = last_val
         modelo_var = base_var_t1[hoja]
-        drift_val = edited_drift.loc["Drift (pp)", nombre]
+        drift_val = drifts[nombre]
         ajustado_var = modelo_var + drift_val
         ajustado_nivel = last_val * (1 + ajustado_var / 100)
         adjusted_forecasts[hoja] = np.array([ajustado_nivel])
